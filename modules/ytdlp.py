@@ -43,8 +43,6 @@ def clean_ansi_codes(text):
     return ansi_escape.sub('', text)
 
 def register_ytdl_handlers(app: Client):
-    # This function now correctly registers the command handlers.
-    # The filter is changed to allow commands in both private and group chats.
     @app.on_message(filters.command("ytdl") & (filters.private | filters.group))
     async def cmd_ytdl(_, m: Message):
         """
@@ -125,6 +123,20 @@ def register_ytdl_handlers(app: Client):
 
         await msg.edit("🎞 Choose quality:", reply_markup=InlineKeyboardMarkup(kb))
 
+    @app.on_callback_query(filters.regex(r"^cancel_ytdl:(.+)$"))
+    async def cancel_ytdl_cb(_, q):
+        """
+        Handles the "Cancel" button click for YouTube/yt-dlp downloads.
+        """
+        tid = q.data.split(":")[1]
+        if tid in ACTIVE_TASKS:
+            ACTIVE_TASKS[tid]["cancel"] = True
+            await q.answer("⛔ Task cancelled.", show_alert=True)
+            # Instantly update message to show the cancellation state
+            await safe_edit_text(q.message, "⛔ **Cancellation requested...**", reply_markup=None)
+        else:
+            await q.answer("❌ Task not found or already finished.", show_alert=True)
+
     @app.on_callback_query(filters.regex(r"^choose_ytdl:(.+?):(.+)$"))
     async def cb_ytdl(_, q):
         """
@@ -142,10 +154,6 @@ def register_ytdl_handlers(app: Client):
         st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(tid))
 
         class ProgressUpdater:
-            """
-            Manages the queue-based progress bar updates for the message.
-            This avoids flooding the Telegram API with too many edits.
-            """
             def __init__(self, msg, url):
                 self.msg = msg
                 self.url = url
@@ -173,17 +181,12 @@ def register_ytdl_handlers(app: Client):
                     pass
 
             def progress_hook(self, d):
-                """
-                A hook function for yt-dlp to send progress updates.
-                """
-                # Check for cancellation before processing
                 if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                     log.info(f"Cancellation detected during download for task {tid}. Raising exception.")
-                    raise DownloadCancelled() # Re-raise our custom exception
+                    raise DownloadCancelled() 
 
                 if d["status"] == "downloading":
                     now = time.time()
-                    # Only update every 3 seconds to avoid FloodWait errors
                     if now - self.last_update < 3:
                         return
 
@@ -198,7 +201,6 @@ def register_ytdl_handlers(app: Client):
                     download_speed = clean_ansi_codes(d.get("_speed_str", "N/A")).strip()
                     eta = clean_ansi_codes(d.get("_eta_str", "N/A")).strip()
 
-                    # Construct the progress message using the custom progress bar
                     progress_text = f"**Downloading**:\n"
                     progress_text += f"**File:** `{clean_ansi_codes(d.get('filename', 'Unknown File'))}`\n"
 
@@ -212,9 +214,6 @@ def register_ytdl_handlers(app: Client):
                     self.last_update = now
 
         async def runner():
-            """
-            The main coroutine to handle the entire download and upload process.
-            """
             fpaths = []
             updater = ProgressUpdater(st, url)
             updater.start()
@@ -233,22 +232,19 @@ def register_ytdl_handlers(app: Client):
                 else:
                     await st.edit(f"✅ Download complete. Splitting file into parts…")
                     fpaths = await asyncio.to_thread(split_file, full_path, MAX_SIZE)
-                    os.remove(full_path) # Remove the large original file after splitting
+                    os.remove(full_path) 
 
                 # Part 2: Upload Media
                 total_parts = len(fpaths)
                 for idx, fpath in enumerate(fpaths, 1):
-                    # Check for cancellation before each upload
                     if ACTIVE_TASKS.get(tid, {}).get("cancel"):
-                        await st.edit("❌ Upload cancelled by user.")
-                        # This return will jump to the finally block
+                        await safe_edit_text(st, "❌ Upload cancelled by user.")
                         return
 
                     if not os.path.exists(fpath):
-                        await st.edit(f"❌ File not found: {fpath}")
+                        await safe_edit_text(st, f"❌ File not found: {fpath}")
                         continue
 
-                    # Define retry logic
                     retries = 3
                     while retries > 0:
                         try:
@@ -256,7 +252,6 @@ def register_ytdl_handlers(app: Client):
                             is_video = file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
 
                             if total_parts == 1 and is_video:
-                                # Send as a streamable video
                                 await app.send_video(
                                     q.message.chat.id,
                                     fpath,
@@ -264,7 +259,6 @@ def register_ytdl_handlers(app: Client):
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "video", fname, 1, 1)
                                 )
                             else:
-                                # Send as a document for multi-part files or non-video formats
                                 part_name = sanitize_filename(os.path.basename(fpath))
                                 if len(part_name) > 150:
                                     ext = os.path.splitext(part_name)[1]
@@ -277,7 +271,6 @@ def register_ytdl_handlers(app: Client):
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "document", part_name, idx, total_parts)
                                 )
 
-                            # If upload is successful, break the retry loop
                             break
                         except FloodWait as e:
                             log.info(f"Flood wait. Waiting for {e.value} seconds...")
@@ -287,23 +280,25 @@ def register_ytdl_handlers(app: Client):
                             retries -= 1
                             if retries > 0:
                                 log.info(f"Retrying upload... {retries} attempts left.")
-                                await asyncio.sleep(5) # Wait before retrying
+                                await asyncio.sleep(5)
                             else:
-                                raise e # Re-raise if all retries fail
+                                raise e 
 
-                await st.edit("✅ All parts uploaded successfully!")
+                await safe_edit_text(st, "✅ All parts uploaded successfully!")
 
             except DownloadCancelled:
-                # The progress callback raises this, so we catch it here to stop the task
-                await st.edit("❌ Download/Upload cancelled.")
+                await safe_edit_text(st, "❌ Download/Upload cancelled.")
             except Exception as e:
-                # Catch any other unexpected errors and report them
-                log.error(f"An error occurred in the runner: {e}", exc_info=True)
-                await st.edit(f"❌ Error: {e}")
+                # yt-dlp swallows custom exceptions and wraps them in a DownloadError.
+                # We check the global cancel flag or the exception string to correctly identify cancellations.
+                if ACTIVE_TASKS.get(tid, {}).get("cancel") or "DownloadCancelled" in str(e):
+                    await safe_edit_text(st, "❌ Download/Upload cancelled.")
+                else:
+                    log.error(f"An error occurred in the runner: {e}", exc_info=True)
+                    await safe_edit_text(st, f"❌ Error: {e}")
             finally:
                 updater.stop()
                 ACTIVE_TASKS.pop(tid, None)
-                # Cleanup: remove all files after a successful or failed task
                 for fpath in fpaths:
                     if os.path.exists(fpath):
                         os.remove(fpath)
@@ -311,24 +306,17 @@ def register_ytdl_handlers(app: Client):
         asyncio.create_task(runner())
 
     def upload_progress(cur, tot, updater, tid, file_type, name, part, total_parts):
-        """
-        A unified progress callback for both video and document uploads.
-        """
-        # Check for the cancel flag. If set, we stop the upload process.
         if ACTIVE_TASKS.get(tid, {}).get("cancel"):
             raise DownloadCancelled()
 
         now = time.time()
-        # Only update every 2 seconds to avoid FloodWait errors
         if now - updater.last_update < 2:
             return
 
-        # Calculate speed and ETA
         elapsed = now - updater.start_time
         speed = (cur - updater.last_uploaded_bytes) / (now - updater.last_update) if now > updater.last_update else 0
         eta = (tot - cur) / speed if speed > 0 else "N/A"
 
-        # Update the last recorded bytes and time
         updater.last_uploaded_bytes = cur
         updater.last_update = now
 
@@ -349,15 +337,11 @@ def register_ytdl_handlers(app: Client):
 
 
 def list_formats(url, cookies=None):
-    """
-    Lists available formats for a given URL, including both video and audio.
-    This function uses a blocking library (yt-dlp) and should be run in a thread.
-    """
     opts = {
         "quiet": True,
         "skip_download": True,
         "cookiefile": cookies if cookies else None,
-        "noplaylist": True, # Ensure we don't process playlists
+        "noplaylist": True,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
@@ -373,7 +357,6 @@ def list_formats(url, cookies=None):
 
             filesize = f.get("filesize") or f.get("filesize_approx") or 0
 
-            # Prioritize formats with both video and audio streams
             if f.get("height") and f.get("acodec") != "none":
                 res_key = f.get("height")
                 if res_key not in unique_fmts or filesize > unique_fmts[res_key]['size']:
@@ -383,7 +366,6 @@ def list_formats(url, cookies=None):
                         "size": filesize,
                         "ext": f.get("ext")
                     }
-            # Handle video-only formats
             elif f.get("height") and f.get("acodec") == "none":
                 res_key = f.get("height")
                 if res_key not in unique_fmts or filesize > unique_fmts[res_key]['size']:
@@ -393,7 +375,6 @@ def list_formats(url, cookies=None):
                         "size": filesize,
                         "ext": f.get("ext")
                     }
-            # Handle audio-only formats
             elif f.get("acodec") != "none" and f.get("vcodec") == "none":
                 res_key = f"audio_{f.get('format_id')}"
                 if res_key not in unique_fmts:
@@ -404,17 +385,11 @@ def list_formats(url, cookies=None):
                         "ext": f.get("ext")
                     }
 
-        # Sort formats by resolution (descending) and audio first
         sorted_list = sorted(unique_fmts.values(), key=lambda x: (x['res'] == 0, -x['res'], x['size']), reverse=False)
         return sorted_list
 
 
 def download_media(url, path, cookies, progress_hook, fmt_id):
-    """
-    Download media using yt-dlp and return the path to the downloaded file.
-    This is a blocking function.
-    """
-    # --- Use a dictionary to map custom IDs to yt-dlp format strings ---
     fmt_map = {
         'merged_360p': 'bestvideo[height=360][ext=mp4]+bestaudio[ext=m4a]',
         'merged_480p': 'bestvideo[height=480][ext=mp4]+bestaudio[ext=m4a]',
@@ -423,7 +398,6 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         'merged_max': 'bestvideo+bestaudio/best',
     }
     format_string = fmt_map.get(fmt_id, fmt_id)
-    # --------------------------------------------------------------------------
 
     opts = {
         "format": format_string,
@@ -432,30 +406,22 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         "progress_hooks": [progress_hook],
     }
 
-    # If we are merging, we need to explicitly tell yt-dlp to use FFmpeg.
-    # --- Check if the format ID is in our map to determine if merging is needed ---
     if fmt_id in fmt_map:
         opts["postprocessors"] = [{
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
         }]
-    # ------------------------------------------------------------------------------------
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        
-        # --- The 'full_path' needs to be handled differently for merged files. ---
-        # yt-dlp automatically handles the filename for merged formats.
         if fmt_id in fmt_map:
             full_path = ydl.prepare_filename(info)
         else:
             full_path = ydl.prepare_filename(info)
-        # --------------------------------------------------------------------------------
         return full_path, info.get("title")
 
 
 def get_progress_bar(percentage):
-    """Generates a progress bar string with the specified visual style."""
     filled_length = int(percentage // 5)
     bar = "█" * filled_length + "░" * (20 - filled_length)
     return f"`[{bar}]`"
