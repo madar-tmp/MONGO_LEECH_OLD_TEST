@@ -17,4 +17,4 @@ tzdata
 pytz
 Pillow
 playwright
-
+curl_cffi
