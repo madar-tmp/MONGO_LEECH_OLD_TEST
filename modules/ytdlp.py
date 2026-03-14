@@ -62,7 +62,8 @@ def register_ytdl_handlers(app: Client):
             # Use asyncio.to_thread to run the blocking list_formats function
             fmts = await asyncio.to_thread(list_formats, url, paths["cookies"])
         except Exception as e:
-            return await msg.edit(f"❌ Error fetching formats: {e}")
+            # This will now print the EXACT error from yt-dlp instead of a generic one
+            return await msg.edit(f"❌ Error fetching formats:\n`{e}`")
 
         if not fmts:
             return await msg.edit("❌ No formats found.")
@@ -347,21 +348,25 @@ def register_ytdl_handlers(app: Client):
 
 
 def list_formats(url, cookies=None):
+    # SAFELY CHECK IF COOKIE FILE ACTUALLY EXISTS ON DISK
+    cookie_path = cookies if (cookies and os.path.exists(cookies)) else None
+
     opts = {
         "quiet": True,
         "skip_download": True,
-        "cookiefile": cookies if cookies else None,
+        "cookiefile": cookie_path,
         "noplaylist": True,
-        "impersonate": "chrome", # STRONG CLOUDFLARE BYPASS
+        "extractor_args": {"generic": ["impersonate"]}, # CORRECT CLOUDFLARE BYPASS
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
-        except DownloadError:
-            return []
+        except Exception as e:
+            # THIS WILL THROW THE REAL ERROR TEXT TO TELEGRAM
+            raise Exception(str(e))
 
         formats = info.get("formats", [])
         unique_fmts = {}
@@ -404,6 +409,9 @@ def list_formats(url, cookies=None):
 
 
 def download_media(url, path, cookies, progress_hook, fmt_id):
+    # SAFELY CHECK IF COOKIE FILE ACTUALLY EXISTS ON DISK
+    cookie_path = cookies if (cookies and os.path.exists(cookies)) else None
+
     fmt_map = {
         'merged_360p': 'bestvideo[height=360][ext=mp4]+bestaudio[ext=m4a]',
         'merged_480p': 'bestvideo[height=480][ext=mp4]+bestaudio[ext=m4a]',
@@ -416,11 +424,11 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
     opts = {
         "format": format_string,
         "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
-        "cookiefile": cookies if cookies else None,
+        "cookiefile": cookie_path,
         "progress_hooks": [progress_hook],
-        "impersonate": "chrome", # STRONG CLOUDFLARE BYPASS
+        "extractor_args": {"generic": ["impersonate"]}, # CORRECT CLOUDFLARE BYPASS
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         },
         "writethumbnail": True, # THUMBNAIL DOWNLOAD
         "postprocessors": [
