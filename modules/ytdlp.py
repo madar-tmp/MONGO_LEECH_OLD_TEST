@@ -13,7 +13,6 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import FloodWait, RPCError
 
-# Assuming these imports are correct based on your project structure.
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
 from .file_splitter import split_file
 import yt_dlp
@@ -132,7 +131,6 @@ def register_ytdl_handlers(app: Client):
         if tid in ACTIVE_TASKS:
             ACTIVE_TASKS[tid]["cancel"] = True
             await q.answer("⛔ Task cancelled.", show_alert=True)
-            # Instantly update message to show the cancellation state
             await safe_edit_text(q.message, "⛔ **Cancellation requested...**", reply_markup=None)
         else:
             await q.answer("❌ Task not found or already finished.", show_alert=True)
@@ -215,6 +213,7 @@ def register_ytdl_handlers(app: Client):
 
         async def runner():
             fpaths = []
+            full_path = ""
             updater = ProgressUpdater(st, url)
             updater.start()
 
@@ -224,6 +223,9 @@ def register_ytdl_handlers(app: Client):
                 full_path, fname = await asyncio.to_thread(
                     download_media, url, paths["downloads"], paths["cookies"], updater.progress_hook, fmt
                 )
+                
+                # Setup Thumbnail
+                thumb_path = os.path.splitext(full_path)[0] + ".jpg"
 
                 filesize = os.path.getsize(full_path)
 
@@ -252,10 +254,13 @@ def register_ytdl_handlers(app: Client):
                             is_video = file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
 
                             if total_parts == 1 and is_video:
+                                # Send as Streamable Video with Thumbnail
                                 await app.send_video(
                                     q.message.chat.id,
                                     fpath,
                                     caption=f"✅ Uploaded: `{fname}`",
+                                    supports_streaming=True, # MAKES VIDEO STREAMABLE
+                                    thumb=thumb_path if os.path.exists(thumb_path) else None, # ADDS THUMBNAIL
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "video", fname, 1, 1)
                                 )
                             else:
@@ -268,6 +273,7 @@ def register_ytdl_handlers(app: Client):
                                     q.message.chat.id,
                                     fpath,
                                     caption=f"✅ Uploaded part {idx}/{total_parts}: `{part_name}`",
+                                    thumb=thumb_path if os.path.exists(thumb_path) else None, # ADDS THUMBNAIL to split parts
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "document", part_name, idx, total_parts)
                                 )
 
@@ -289,8 +295,6 @@ def register_ytdl_handlers(app: Client):
             except DownloadCancelled:
                 await safe_edit_text(st, "❌ Download/Upload cancelled.")
             except Exception as e:
-                # yt-dlp swallows custom exceptions and wraps them in a DownloadError.
-                # We check the global cancel flag or the exception string to correctly identify cancellations.
                 if ACTIVE_TASKS.get(tid, {}).get("cancel") or "DownloadCancelled" in str(e):
                     await safe_edit_text(st, "❌ Download/Upload cancelled.")
                 else:
@@ -299,9 +303,15 @@ def register_ytdl_handlers(app: Client):
             finally:
                 updater.stop()
                 ACTIVE_TASKS.pop(tid, None)
+                # Cleanup files
                 for fpath in fpaths:
                     if os.path.exists(fpath):
                         os.remove(fpath)
+                # Cleanup Thumbnail
+                if full_path:
+                    thumb_path = os.path.splitext(full_path)[0] + ".jpg"
+                    if os.path.exists(thumb_path):
+                        os.remove(thumb_path)
 
         asyncio.create_task(runner())
 
@@ -342,7 +352,10 @@ def list_formats(url, cookies=None):
         "skip_download": True,
         "cookiefile": cookies if cookies else None,
         "noplaylist": True,
-        "extractor_args": {"generic": ["impersonate"]},  # ADDED CLOUDFLARE BYPASS
+        "impersonate": "chrome", # STRONG CLOUDFLARE BYPASS
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
@@ -405,14 +418,24 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
         "cookiefile": cookies if cookies else None,
         "progress_hooks": [progress_hook],
-        "extractor_args": {"generic": ["impersonate"]}, # ADDED CLOUDFLARE BYPASS
+        "impersonate": "chrome", # STRONG CLOUDFLARE BYPASS
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        "writethumbnail": True, # THUMBNAIL DOWNLOAD
+        "postprocessors": [
+            {
+                'key': 'FFmpegThumbnailsConvertor',
+                'format': 'jpg',
+            }
+        ]
     }
 
     if fmt_id in fmt_map:
-        opts["postprocessors"] = [{
+        opts["postprocessors"].append({
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
-        }]
+        })
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
