@@ -63,13 +63,16 @@ def register_ytdl_handlers(app: Client):
         ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id, "cancel": False, "formats": fmts}
 
         kb = []
-        # Create perfectly clean buttons: 1 per resolution, descending
+        # Create perfectly clean buttons
         for i, f in enumerate(fmts):
-            size_text = humanbytes(f.get("size", 0)) if f.get("size", 0) > 0 else "Unknown Size"
+            size = f.get("size", 0)
+            # If size is greater than 0, show it. Otherwise, leave it blank.
+            size_str = f" • {humanbytes(size)}" if size > 0 else ""
+            
             if f.get('res') == 0:
-                label = f"🎵 Audio Only • {size_text}"
+                label = f"🎵 Audio Only{size_str}"
             else:
-                label = f"🎬 {f.get('res')}p • {size_text}"
+                label = f"🎬 {f.get('res')}p{size_str}"
             
             # Pass the list index (i) instead of the long format string
             kb.append([InlineKeyboardButton(label, callback_data=f"choose_ytdl:{tid}:{i}")])
@@ -166,8 +169,8 @@ def register_ytdl_handlers(app: Client):
             try:
                 await st.edit("✅ Download starting...", reply_markup=cancel_btn(tid))
                 
-                # Download media using the generated optimal format string
-                full_path, fname = await asyncio.to_thread(
+                # Retrieve all required streaming metadata from yt-dlp
+                full_path, fname, duration, width, height = await asyncio.to_thread(
                     download_media, url, paths["downloads"], paths["cookies"], updater.progress_hook, fmt
                 )
                 
@@ -198,11 +201,15 @@ def register_ytdl_handlers(app: Client):
                             is_audio = file_ext in ['.m4a', '.mp3', '.wav', '.ogg']
 
                             if total_parts == 1 and is_video:
+                                # Now parsing all metadata (width, height, duration) to force streaming!
                                 await app.send_video(
                                     q.message.chat.id,
                                     fpath,
                                     caption=f"✅ Uploaded: `{fname}`",
-                                    supports_streaming=True, # MAKES VIDEO STREAMABLE
+                                    supports_streaming=True, 
+                                    duration=int(duration) if duration else 0,
+                                    width=int(width) if width else 0,
+                                    height=int(height) if height else 0,
                                     thumb=thumb_path if os.path.exists(thumb_path) else None,
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "video", fname, 1, 1)
                                 )
@@ -211,6 +218,7 @@ def register_ytdl_handlers(app: Client):
                                     q.message.chat.id,
                                     fpath,
                                     caption=f"✅ Uploaded: `{fname}`",
+                                    duration=int(duration) if duration else 0,
                                     progress=lambda cur, tot: upload_progress(cur, tot, updater, tid, "audio", fname, 1, 1)
                                 )
                             else:
@@ -281,7 +289,7 @@ def list_formats(url, cookies=None):
         "skip_download": True,
         "cookiefile": cookie_path,
         "noplaylist": True,
-        "extractor_args": {"generic": ["impersonate"]}, # STRONG CLOUDFLARE BYPASS
+        "extractor_args": {"generic": ["impersonate"]}, 
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
@@ -360,6 +368,11 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         "merge_output_format": "mp4", # Forces merge of video+audio into standard MP4 format
         "postprocessors": [
             {
+                # Force yt-dlp to convert ANY video format to MP4 so it streams properly on Telegram
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            },
+            {
                 'key': 'FFmpegThumbnailsConvertor',
                 'format': 'jpg',
             }
@@ -370,8 +383,8 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         info = ydl.extract_info(url, download=True)
         full_path = ydl.prepare_filename(info)
         
-        # When yt-dlp merges files, it might change the extension safely behind the scenes.
-        # This checks the disk to guarantee we return the EXACT correct file path to Telegram.
+        # When yt-dlp converts files, it might change the extension to .mp4.
+        # This checks the disk to guarantee we return the EXACT correct file path.
         base, ext = os.path.splitext(full_path)
         if not os.path.exists(full_path):
             for e in [".mp4", ".mkv", ".m4a", ".mp3", ".webm"]:
@@ -379,7 +392,8 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
                     full_path = base + e
                     break
                     
-        return full_path, info.get("title")
+        # Return the file path PLUS the streaming metadata
+        return full_path, info.get("title", "video"), info.get("duration", 0), info.get("width", 0), info.get("height", 0)
 
 
 def get_progress_bar(percentage):
