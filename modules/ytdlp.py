@@ -342,6 +342,7 @@ def list_formats(url, cookies=None):
         "skip_download": True,
         "cookiefile": cookies if cookies else None,
         "noplaylist": True,
+        "extractor_args": {"generic": ["impersonate"]},  # ADDED CLOUDFLARE BYPASS
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
@@ -404,6 +405,7 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
         "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
         "cookiefile": cookies if cookies else None,
         "progress_hooks": [progress_hook],
+        "extractor_args": {"generic": ["impersonate"]}, # ADDED CLOUDFLARE BYPASS
     }
 
     if fmt_id in fmt_map:
